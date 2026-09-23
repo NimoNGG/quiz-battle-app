@@ -1,0 +1,101 @@
+[
+  {
+    "id": "kokugo-1",
+    "category": "国語",
+    "gradeLevel": "小学校",
+    "question": "次のことわざの空欄に入る言葉は？\n「（ ）も木から落ちる」",
+    "options": ["サル", "ネコ", "トリ", "クマ"],
+    "answerIndex": 0,
+    "explanation": "「猿も木から落ちる」はその道の上手な人でも時には失敗することの例えです。"
+  },
+  {
+    "id": "kokugo-2",
+    "category": "国語",
+    "gradeLevel": "中学校",
+    "question": "夏目漱石の小説『吾輩は猫である』の冒頭の有名な一文は？",
+    "options": ["名前はまだ無い", "春はあけぼの", "親譲りの無鉄砲", "国境の長いトンネル"],
+    "answerIndex": 0,
+    "explanation": "「吾輩は猫である。名前はまだ無い。どこで生れたかとんと見当がつかぬ。」と続きます。"
+  },
+  {
+    "id": "math-1",
+    "category": "算数・数学",
+    "gradeLevel": "小学校",
+    "question": "三角形の面積を求める公式として正しいものは？",
+    "options": ["底辺 × 高さ ÷ 2", "底辺 × 高さ", "（上底 ＋ 下底）× 高さ ÷ 2", "半径 × 半径 × 3.14"],
+    "answerIndex": 0,
+    "explanation": "三角形の面積は「底辺 × 高さ ÷ 2」で求めます。"
+  },
+  {
+    "id": "math-2",
+    "category": "算数・数学",
+    "gradeLevel": "中学校",
+    "question": "直角三角形において斜辺をc、他の2辺をa,bとしたときの三平方の定理は？",
+    "options": ["a² + b² = c²", "a + b = c", "a² - b² = c²", "2a + 2b = c"],
+    "answerIndex": 0,
+    "explanation": "ピタゴラスの定理とも呼ばれ、a² + b² = c² が成り立ちます。"
+  },
+  {
+    "id": "sci-1",
+    "category": "理科",
+    "gradeLevel": "小学校",
+    "question": "植物が光合成を行う際に、二酸化炭素とともに吸収するものは？",
+    "options": ["水", "窒素", "酸素", "水素"],
+    "answerIndex": 0,
+    "explanation": "光合成は水と二酸化炭素を取り込み、光エネルギーを使ってデンプンと酸素を作ります。"
+  },
+  {
+    "id": "sci-2",
+    "category": "理科",
+    "gradeLevel": "中学校",
+    "question": "重曹（炭酸水素ナトリウム）の化学式として正しいものは？",
+    "options": ["NaHCO₃", "NaCl", "NaOH", "Na₂CO₃"],
+    "answerIndex": 0,
+    "explanation": "炭酸水素ナトリウムの化学式は NaHCO₃ です。"
+  },
+  {
+    "id": "soc-1",
+    "category": "社会",
+    "gradeLevel": "小学校",
+    "question": "日本で最も面積が広い都道府県は？",
+    "options": ["北海道", "岩手県", "福島県", "長野県"],
+    "answerIndex": 0,
+    "explanation": "1位は北海道、2位は岩手県、3位は福島県です。"
+  },
+  {
+    "id": "soc-2",
+    "category": "社会",
+    "gradeLevel": "中学校",
+    "question": "1867年に徳川慶喜が政権を朝廷に返上した歴史的出来事は？",
+    "options": ["大政奉還", "王政復古の大号令", "戊辰戦争", "版籍奉還"],
+    "answerIndex": 0,
+    "explanation": "江戸幕府第15代将軍・徳川慶喜が行った政権返上を「大政奉還」といいます。"
+  },
+  {
+    "id": "eng-1",
+    "category": "英語",
+    "gradeLevel": "中学校",
+    "question": "動詞「go」の過去形として正しい綴りはどれ？",
+    "options": ["went", "goed", "gone", "goes"],
+    "answerIndex": 0,
+    "explanation": "go の不規則変化動詞の過去形は went です。"
+  },
+  {
+    "id": "triv-1",
+    "category": "雑学",
+    "gradeLevel": "雑学",
+    "question": "オリンピックの五輪マークの5つの輪が象徴しているものは？",
+    "options": ["世界5大陸", "五大栄養素", "平和の5色", "最初の開催国5カ国"],
+    "answerIndex": 0,
+    "explanation": "アジア、ヨーロッパ、アフリカ、南北アメリカ、オセアニアの5大陸を象徴しています。"
+  },
+  {
+    "id": "triv-2",
+    "category": "雑学",
+    "gradeLevel": "雑学",
+    "question": "鉛筆の芯の主原料として正しい組み合わせは？",
+    "options": ["黒鉛と粘土", "木炭とプラスチック", "鉄とカーボン", "石灰と樹脂"],
+    "answerIndex": 0,
+    "explanation": "鉛筆の芯は「黒鉛」と「粘土」を混ぜ合わせて高温で焼き固めて作られます。"
+  }
+]
