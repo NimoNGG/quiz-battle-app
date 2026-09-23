@@ -58,7 +58,7 @@ async function replenishQuestionsInBackground(category) {
     const ai = new GoogleGenAI({ apiKey });
     const targetCat = category === 'all' ? '国語, 算数・数学, 理科, 社会, 雑学' : category;
 
-    const prompt = `日本の小学校・中学校の教科書内容、または日本で親しまれる良質な雑学から、4択クイズを2問作成してください。
+    const prompt = `日本の小学校・中学校の教科書内容、または日本で親しまれる良質な雑学から、4択クイズを5問作成してください。
 ジャンル: ${targetCat}
 条件:
 - 日本の学習指導要領や学校の授業で習う親しみやすい良問
