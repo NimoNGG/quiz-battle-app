@@ -422,9 +422,10 @@ export default function MultiPlayerQuizApp() {
                       className="text-xs bg-white border border-slate-200 rounded-lg px-2 py-1 font-semibold text-slate-700"
                     >
                       <option value="all">全教科MIX</option>
-                      <option value="理科">理科・自然</option>
-                      <option value="算数・数学">数学</option>
-                      <option value="社会">歴史・社会</option>
+                      <option value="国語">国語</option>
+                      <option value="算数・数学">算数・数学</option>
+                      <option value="理科">理科</option>
+                      <option value="社会">社会</option>
                       <option value="雑学">雑学</option>
                     </select>
                   </div>
