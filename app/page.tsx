@@ -1,620 +1,724 @@
 'use client';
 
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useMemo } from 'react';
 import { supabase } from '@/lib/supabase';
 import { QRCodeSVG } from 'qrcode.react';
 
-type Question = {
-  id: string;
-  category: string;
-  gradeLevel: string;
-  question: string;
-  options: string[];
-  answerIndex: number;
-  explanation: string;
+// 効果音再生
+const playTone = (type: string) => {
+  try {
+    const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
+    if (!AudioCtx) return;
+    const ctx = new AudioCtx();
+    const osc = ctx.createOscillator();
+    const gain = ctx.createGain();
+    osc.connect(gain);
+    gain.connect(ctx.destination);
+    const now = ctx.currentTime;
+
+    if (type === 'correct') {
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(523.25, now);
+      osc.frequency.setValueAtTime(659.25, now + 0.08);
+      osc.frequency.setValueAtTime(783.99, now + 0.16);
+      gain.gain.setValueAtTime(0.2, now);
+      gain.gain.exponentialRampToValueAtTime(0.01, now + 0.35);
+      osc.start(now);
+      osc.stop(now + 0.35);
+    } else if (type === 'wrong') {
+      osc.type = 'sawtooth';
+      osc.frequency.setValueAtTime(220, now);
+      osc.frequency.setValueAtTime(164.81, now + 0.15);
+      gain.gain.setValueAtTime(0.2, now);
+      gain.gain.exponentialRampToValueAtTime(0.01, now + 0.4);
+      osc.start(now);
+      osc.stop(now + 0.4);
+    } else if (type === 'tick') {
+      osc.type = 'sine';
+      osc.frequency.setValueAtTime(880, now);
+      gain.gain.setValueAtTime(0.05, now);
+      gain.gain.exponentialRampToValueAtTime(0.001, now + 0.04);
+      osc.start(now);
+      osc.stop(now + 0.05);
+    }
+  } catch (e) {}
 };
 
-type Player = {
-  id: string;
-  name: string;
-  score: number;
-  isHost: boolean;
-  hasAnswered?: boolean;
-};
-
-export default function QuizApp() {
-  // ユーザー・ロビー状態
-  const [playerName, setPlayerName] = useState('');
+export default function MultiPlayerQuizApp() {
+  const [stage, setStage] = useState<'home' | 'lobby' | 'playing' | 'final_result'>('home');
+  const [userName, setUserName] = useState('');
   const [roomCode, setRoomCode] = useState('');
+  const [inputCode, setInputCode] = useState('');
   const [isHost, setIsHost] = useState(false);
-  const [myId] = useState(() => Math.random().toString(36).substring(2, 9));
-  const [gameState, setGameState] = useState<'home' | 'lobby' | 'loading' | 'playing' | 'result'>('home');
+  const [players, setPlayers] = useState<any[]>([]);
+
+  // クイズ設定
   const [selectedCategory, setSelectedCategory] = useState('all');
-
-  // プレイヤー一覧
-  const [players, setPlayers] = useState<Player[]>([]);
-
-  // クイズ状態
-  const [questions, setQuestions] = useState<Question[]>([]);
+  const [questionCount, setQuestionCount] = useState(5);
+  const [questions, setQuestions] = useState<any[]>([]);
   const [currentIndex, setCurrentIndex] = useState(0);
-  const [selectedAnswer, setSelectedAnswer] = useState<number | null>(null);
-  const [isAnswered, setIsAnswered] = useState(false);
-  const [myScore, setMyScore] = useState(0);
+  const [isGenerating, setIsGenerating] = useState(false);
+  const [questionSource, setQuestionSource] = useState('');
+
+  // プレイ中状態
   const [timeLeft, setTimeLeft] = useState(15);
+  const [selectedOption, setSelectedOption] = useState<number | null>(null);
+  const [isAnswered, setIsAnswered] = useState(false);
+  const [combo, setCombo] = useState(0);
 
   const channelRef = useRef<any>(null);
+  const timerRef = useRef<any>(null);
+  const playerIdRef = useRef('');
 
-  // URLパラメータから部屋コードを取得
   useEffect(() => {
+    playerIdRef.current = 'player_' + Math.random().toString(36).substring(2, 9);
     if (typeof window !== 'undefined') {
       const params = new URLSearchParams(window.location.search);
-      const room = params.get('room');
-      if (room) {
-        setRoomCode(room.toUpperCase());
+      const codeFromUrl = params.get('room');
+      if (codeFromUrl && /^\d{4}$/.test(codeFromUrl)) {
+        setInputCode(codeFromUrl);
       }
     }
   }, []);
 
-  // タイマー処理
-  useEffect(() => {
-    if (gameState !== 'playing' || isAnswered) return;
-
-    if (timeLeft <= 0) {
-      handleTimeUp();
-      return;
+  // ブロードキャスト送信
+  const broadcastMessage = (event: string, payload: any) => {
+    if (!channelRef.current) return;
+    try {
+      channelRef.current.send({
+        type: 'broadcast',
+        event,
+        payload,
+      });
+    } catch (e) {
+      console.warn('Realtime送信失敗:', e);
     }
-
-    const timer = setInterval(() => {
-      setTimeLeft(prev => prev - 1);
-    }, 1000);
-
-    return () => clearInterval(timer);
-  }, [gameState, timeLeft, isAnswered]);
-
-  // Presence同期処理の共通ヘルパー
-  const syncPresenceState = (channel: any) => {
-    const state = channel.presenceState();
-    const currentPlayers: Player[] = [];
-    Object.keys(state).forEach(key => {
-      const presenceList = state[key] as any[];
-      if (presenceList && presenceList.length > 0) {
-        const user = presenceList[0];
-        currentPlayers.push({
-          id: user.id,
-          name: user.name,
-          score: user.score || 0,
-          isHost: user.isHost,
-          hasAnswered: user.hasAnswered || false,
-        });
-      }
-    });
-    setPlayers(currentPlayers);
   };
 
-  // Realtimeチャンネルの接続と監視
-  const joinRoomChannel = (code: string, asHost: boolean) => {
+  // ゲーム開始共通処理
+  const startQuizGame = (qList: any[], src: string) => {
+    if (!qList || qList.length === 0) {
+      alert('問題データが空です');
+      return;
+    }
+    setQuestions(qList);
+    setQuestionSource(src || 'OpenTDB');
+    setCurrentIndex(0);
+    setSelectedOption(null);
+    setIsAnswered(false);
+    setCombo(0);
+    setTimeLeft(15);
+    setStage('playing');
+  };
+
+  const connectToRoom = (code: string, hostFlag: boolean, initialUserName: string) => {
     if (channelRef.current) {
       supabase.removeChannel(channelRef.current);
     }
 
-    const channel = supabase.channel(`room_${code}`, {
+    const channel = supabase.channel(`quiz-room-${code}`, {
       config: {
-        presence: {
-          key: myId,
-        },
+        broadcast: { self: true },
       },
     });
 
-    // 1. Presence 同期（参加者・ホスト双方で完全同期）
     channel
-      .on('presence', { event: 'sync' }, () => {
-        syncPresenceState(channel);
+      // 誰かが入室したとき
+      .on('broadcast', { event: 'player_join' }, ({ payload }) => {
+        setPlayers((prev) => {
+          if (prev.some((p) => p.id === payload.id)) return prev;
+          return [...prev, payload];
+        });
+        // 既存メンバーは新しく入ってきた人に自分の情報を送り返して名簿を同期
+        if (payload.id !== playerIdRef.current) {
+          channel.send({
+            type: 'broadcast',
+            event: 'room_sync',
+            payload: {
+              id: playerIdRef.current,
+              name: initialUserName,
+              score: 0,
+              isHost: hostFlag,
+              answered: false,
+            },
+          });
+        }
       })
-      .on('presence', { event: 'join' }, () => {
-        syncPresenceState(channel);
-      })
-      .on('presence', { event: 'leave' }, () => {
-        syncPresenceState(channel);
-      });
-
-    // 2. Broadcast イベントの受信
-    channel
-      // ゲーム開始
-      .on('broadcast', { event: 'start_game' }, ({ payload }) => {
-        setQuestions(payload.questions);
-        setCurrentIndex(0);
-        setSelectedAnswer(null);
-        setIsAnswered(false);
-        setMyScore(0);
-        setTimeLeft(15);
-        setGameState('playing');
-
-        channel.track({
-          id: myId,
-          name: playerName,
-          score: 0,
-          isHost: asHost,
-          hasAnswered: false,
+      // 既存メンバーからの同期受信用
+      .on('broadcast', { event: 'room_sync' }, ({ payload }) => {
+        setPlayers((prev) => {
+          if (prev.some((p) => p.id === payload.id)) return prev;
+          return [...prev, payload];
         });
       })
-      // 次の問題へ
-      .on('broadcast', { event: 'next_question' }, ({ payload }) => {
-        setCurrentIndex(payload.nextIndex);
-        setSelectedAnswer(null);
-        setIsAnswered(false);
-        setTimeLeft(15);
-
-        channel.track({
-          id: myId,
-          name: playerName,
-          score: myScore,
-          isHost: asHost,
-          hasAnswered: false,
-        });
+      .on('broadcast', { event: 'game_start' }, ({ payload }) => {
+        startQuizGame(payload.questions, payload.source);
       })
-      // スコアの同期
-      .on('broadcast', { event: 'update_score' }, ({ payload }) => {
-        setPlayers(prev =>
-          prev.map(p => (p.id === payload.id ? { ...p, score: payload.score, hasAnswered: true } : p))
+      .on('broadcast', { event: 'player_answered' }, ({ payload }) => {
+        setPlayers((prev) =>
+          prev.map((p) => (p.id === payload.id ? { ...p, score: payload.score, answered: true } : p))
         );
       })
-      // 同じ部屋で再戦（全員一斉にロビーへ復帰）
-      .on('broadcast', { event: 'rematch' }, () => {
-        setCurrentIndex(0);
-        setSelectedAnswer(null);
+      .on('broadcast', { event: 'next_question' }, ({ payload }) => {
+        setCurrentIndex(payload.nextIndex);
+        setSelectedOption(null);
         setIsAnswered(false);
-        setMyScore(0);
         setTimeLeft(15);
-        setGameState('lobby');
-
-        channel.track({
-          id: myId,
-          name: playerName,
-          score: 0,
-          isHost: asHost,
-          hasAnswered: false,
-        });
+        setStage('playing');
+        setPlayers((prev) => prev.map((p) => ({ ...p, answered: false })));
+      })
+      .on('broadcast', { event: 'game_finish' }, () => {
+        setStage('final_result');
+      })
+      // 同じ部屋で再戦（全員一斉にロビー復帰）
+      .on('broadcast', { event: 'room_rematch' }, () => {
+        setQuestions([]);
+        setCurrentIndex(0);
+        setSelectedOption(null);
+        setIsAnswered(false);
+        setCombo(0);
+        setTimeLeft(15);
+        setStage('lobby');
+        setPlayers((prev) =>
+          prev.map((p) => ({
+            ...p,
+            score: 0,
+            answered: false,
+          }))
+        );
+      })
+      .subscribe((status) => {
+        if (status === 'SUBSCRIBED') {
+          channel.send({
+            type: 'broadcast',
+            event: 'player_join',
+            payload: {
+              id: playerIdRef.current,
+              name: initialUserName,
+              score: 0,
+              isHost: hostFlag,
+              answered: false,
+            },
+          });
+        }
       });
-
-    // 接続完了後に確実にPresence送信
-    channel.subscribe(async (status) => {
-      if (status === 'SUBSCRIBED') {
-        await channel.track({
-          id: myId,
-          name: playerName,
-          score: 0,
-          isHost: asHost,
-          hasAnswered: false,
-        });
-      }
-    });
 
     channelRef.current = channel;
   };
 
-  // 部屋作成（ホスト）
+  // 部屋作成（ホスト1人でも即座に一覧に登録）
   const handleCreateRoom = () => {
-    if (!playerName.trim()) return alert('名前を入力してください！');
-    const randomCode = Math.random().toString(36).substring(2, 6).toUpperCase();
-    setRoomCode(randomCode);
+    const validName = userName.trim() || 'ホスト';
+    const random4Digit = Math.floor(1000 + Math.random() * 9000).toString();
+    setRoomCode(random4Digit);
     setIsHost(true);
-    joinRoomChannel(randomCode, true);
-    setGameState('lobby');
+    setStage('lobby');
+
+    setPlayers([
+      {
+        id: playerIdRef.current,
+        name: validName,
+        score: 0,
+        isHost: true,
+        answered: false,
+      },
+    ]);
+
+    connectToRoom(random4Digit, true, validName);
   };
 
-  // 部屋参加（ゲスト）
+  // 部屋参加（参加者自身も即座に一覧に登録）
   const handleJoinRoom = () => {
-    if (!playerName.trim()) return alert('名前を入力してください！');
-    if (!roomCode.trim()) return alert('4桁の部屋コードを入力してください！');
-    const upperCode = roomCode.trim().toUpperCase();
-    setRoomCode(upperCode);
+    const validName = userName.trim() || 'ゲスト';
+    if (!/^\d{4}$/.test(inputCode)) return alert('4桁の半角数字を入力してください');
+    setRoomCode(inputCode);
     setIsHost(false);
-    joinRoomChannel(upperCode, false);
-    setGameState('lobby');
+    setStage('lobby');
+
+    setPlayers([
+      {
+        id: playerIdRef.current,
+        name: validName,
+        score: 0,
+        isHost: false,
+        answered: false,
+      },
+    ]);
+
+    connectToRoom(inputCode, false, validName);
   };
 
-  // 対戦開始（ホストが実行）
-  const handleStartGame = async () => {
-    setGameState('loading');
+  // 対戦開始ボタン
+  const handleHostStartGame = async () => {
+    setIsGenerating(true);
 
     try {
       const res = await fetch('/api/quiz', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ count: 5, category: selectedCategory }),
+        body: JSON.stringify({ count: questionCount, category: selectedCategory }),
       });
       const data = await res.json();
 
-      if (data.questions && data.questions.length > 0) {
-        channelRef.current.send({
-          type: 'broadcast',
-          event: 'start_game',
-          payload: { questions: data.questions },
-        });
-
-        setQuestions(data.questions);
-        setCurrentIndex(0);
-        setSelectedAnswer(null);
-        setIsAnswered(false);
-        setMyScore(0);
-        setTimeLeft(15);
-        setGameState('playing');
-      } else {
-        alert('問題の取得に失敗しました。');
-        setGameState('lobby');
+      if (!res.ok || !data.questions || data.questions.length === 0) {
+        alert(data.error || '問題の取得に失敗しました');
+        setIsGenerating(false);
+        return;
       }
-    } catch (e) {
-      alert('通信エラーが発生しました。');
-      setGameState('lobby');
+
+      // 他のプレイヤーへ配信
+      broadcastMessage('game_start', {
+        questions: data.questions,
+        source: data.source,
+      });
+
+      // ホスト自身も直ちにクイズ画面へ遷移
+      startQuizGame(data.questions, data.source);
+
+    } catch (e: any) {
+      alert(`通信エラーが発生しました: ${e.message}`);
+    } finally {
+      setIsGenerating(false);
     }
   };
+
+  // 部屋を維持してもう一度遊ぶ（ホストが発火）
+  const handleHostRematch = () => {
+    if (!isHost) return;
+    broadcastMessage('room_rematch', {});
+    setQuestions([]);
+    setCurrentIndex(0);
+    setSelectedOption(null);
+    setIsAnswered(false);
+    setCombo(0);
+    setTimeLeft(15);
+    setStage('lobby');
+    setPlayers((prev) =>
+      prev.map((p) => ({
+        ...p,
+        score: 0,
+        answered: false,
+      }))
+    );
+  };
+
+  // 制限時間カウントダウン
+  useEffect(() => {
+    if (stage !== 'playing' || isAnswered) return;
+
+    timerRef.current = setInterval(() => {
+      setTimeLeft((prev) => {
+        if (prev <= 1) {
+          clearInterval(timerRef.current);
+          handleAnswer(-1);
+          return 0;
+        }
+        if (prev <= 4) playTone('tick');
+        return prev - 1;
+      });
+    }, 1000);
+
+    return () => clearInterval(timerRef.current);
+  }, [stage, isAnswered, currentIndex]);
 
   // 回答処理
-  const handleSelectOption = (index: number) => {
+  const handleAnswer = (idx: number) => {
     if (isAnswered) return;
-
-    setSelectedAnswer(index);
+    clearInterval(timerRef.current);
+    setSelectedOption(idx);
     setIsAnswered(true);
 
-    const isCorrect = index === questions[currentIndex].answerIndex;
-    const newScore = isCorrect ? myScore + Math.max(10, timeLeft * 10) : myScore;
-    if (isCorrect) setMyScore(newScore);
+    const currentQ = questions[currentIndex];
+    const isCorrect = currentQ && idx === currentQ.answerIndex;
+    let gainedPoints = 0;
 
-    channelRef.current.send({
-      type: 'broadcast',
-      event: 'update_score',
-      payload: { id: myId, score: newScore },
-    });
+    if (isCorrect) {
+      playTone('correct');
+      const timeBonus = timeLeft * 10;
+      const comboBonus = combo * 20;
+      gainedPoints = 100 + timeBonus + comboBonus;
+      setCombo((prev) => prev + 1);
+    } else {
+      playTone('wrong');
+      setCombo(0);
+    }
 
-    channelRef.current.track({
-      id: myId,
-      name: playerName,
+    // 自身のスコアを更新
+    setPlayers((prev) =>
+      prev.map((p) =>
+        p.id === playerIdRef.current
+          ? { ...p, score: p.score + gainedPoints, answered: true }
+          : p
+      )
+    );
+
+    const myCurrent = players.find((p) => p.id === playerIdRef.current);
+    const newScore = (myCurrent ? myCurrent.score : 0) + gainedPoints;
+
+    broadcastMessage('player_answered', {
+      id: playerIdRef.current,
       score: newScore,
-      isHost: isHost,
-      hasAnswered: true,
     });
   };
 
-  // 時間切れ
-  const handleTimeUp = () => {
-    setIsAnswered(true);
-    channelRef.current.track({
-      id: myId,
-      name: playerName,
-      score: myScore,
-      isHost: isHost,
-      hasAnswered: true,
-    });
-  };
-
-  // 次の問題へ（ホストが進行）
-  const handleNextQuestion = () => {
+  // 次の問題へ
+  const handleHostNext = () => {
     if (currentIndex + 1 < questions.length) {
-      const next = currentIndex + 1;
-      channelRef.current.send({
-        type: 'broadcast',
-        event: 'next_question',
-        payload: { nextIndex: next },
-      });
-      setCurrentIndex(next);
-      setSelectedAnswer(null);
+      const nextIdx = currentIndex + 1;
+      broadcastMessage('next_question', { nextIndex: nextIdx });
+      setCurrentIndex(nextIdx);
+      setSelectedOption(null);
       setIsAnswered(false);
       setTimeLeft(15);
+      setPlayers((prev) => prev.map((p) => ({ ...p, answered: false })));
     } else {
-      setGameState('result');
+      broadcastMessage('game_finish', {});
+      setStage('final_result');
     }
   };
 
-  // 同じ部屋でもう一度遊ぶ（部屋維持）
-  const handleRematch = () => {
-    if (!isHost) return;
-    channelRef.current.send({
-      type: 'broadcast',
-      event: 'rematch',
-      payload: {},
-    });
-    setGameState('lobby');
-  };
+  const rankedPlayers = useMemo(() => {
+    return [...players].sort((a, b) => b.score - a.score);
+  }, [players]);
 
-  // 招待URL
-  const shareUrl = typeof window !== 'undefined' ? `${window.location.origin}?room=${roomCode}` : '';
+  const currentQ = questions[currentIndex];
+  const shareUrl = typeof window !== 'undefined' ? `${window.location.origin}/?room=${roomCode}` : '';
 
   return (
-    <div className="min-h-screen bg-slate-900 text-white flex flex-col items-center justify-center p-4">
-      <div className="w-full max-w-md bg-slate-800 rounded-3xl p-6 shadow-2xl border border-slate-700">
-
-        {/* 1. ホーム画面 */}
-        {gameState === 'home' && (
-          <div className="flex flex-col gap-6">
-            <div className="text-center">
-              <h1 className="text-3xl font-black bg-gradient-to-r from-amber-400 to-orange-500 bg-clip-text text-transparent">
-                義務教育クイズ対戦
-              </h1>
-              <p className="text-xs text-slate-400 mt-1">小中学校の教科書・雑学でリアルタイム対決！</p>
+    <div className="min-h-screen bg-slate-100 flex items-center justify-center p-3 sm:p-6 font-sans">
+      <div className="w-full max-w-md bg-white rounded-3xl shadow-xl border border-slate-200 overflow-hidden flex flex-col min-h-[640px] relative">
+        {/* ヘッダー */}
+        <div className="px-5 py-3.5 bg-white border-b border-slate-100 flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <span className="w-2.5 h-2.5 rounded-full bg-emerald-500 animate-pulse"></span>
+            <span className="font-black text-slate-800 text-sm tracking-wide">Q-Battle Online</span>
+          </div>
+          {roomCode && (
+            <div className="text-xs bg-indigo-50 border border-indigo-200 text-indigo-700 font-bold px-2.5 py-1 rounded-full">
+              部屋: <span className="tracking-widest">{roomCode}</span>
             </div>
+          )}
+        </div>
 
-            <div className="flex flex-col gap-3">
-              <label className="text-xs font-bold text-slate-400">あなたのプレイヤー名</label>
-              <input
-                type="text"
-                placeholder="ニックネームを入力"
-                value={playerName}
-                onChange={(e) => setPlayerName(e.target.value)}
-                className="bg-slate-700 border border-slate-600 rounded-xl px-4 py-3 text-white font-bold outline-none focus:border-amber-400"
-              />
-            </div>
-
-            <div className="flex flex-col gap-3">
-              <button
-                onClick={handleCreateRoom}
-                className="w-full bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-slate-950 font-black py-4 rounded-xl shadow-lg transition active:scale-95"
-              >
-                部屋を作ってホストになる
-              </button>
-
-              <div className="flex items-center gap-2 my-1">
-                <div className="flex-1 h-px bg-slate-700"></div>
-                <span className="text-xs text-slate-500 font-bold">または</span>
-                <div className="flex-1 h-px bg-slate-700"></div>
+        {/* 1. ホーム */}
+        {stage === 'home' && (
+          <div className="flex-1 p-6 flex flex-col justify-between">
+            <div className="space-y-5 pt-2">
+              <div className="text-center">
+                <span className="text-xs font-bold text-indigo-600 bg-indigo-50 px-3 py-1 rounded-full border border-indigo-100">
+                  リアルタイム対戦
+                </span>
+                <h1 className="text-2xl font-black text-slate-800 mt-2">クイズバトル！</h1>
+                <p className="text-xs text-slate-500 mt-1">4桁コードやQRコードで友達と即対決</p>
               </div>
 
-              <div className="flex gap-2">
+              <div>
+                <label className="text-xs font-bold text-slate-500 block mb-1.5">あなたのニックネーム</label>
                 <input
                   type="text"
-                  placeholder="部屋番号(4桁)"
-                  maxLength={4}
-                  value={roomCode}
-                  onChange={(e) => setRoomCode(e.target.value.toUpperCase())}
-                  className="w-1/2 bg-slate-700 border border-slate-600 rounded-xl px-4 py-3 text-center uppercase font-black text-amber-400 tracking-widest outline-none focus:border-amber-400"
+                  maxLength={10}
+                  placeholder="名前を入力"
+                  value={userName}
+                  onChange={(e) => setUserName(e.target.value)}
+                  className="w-full px-4 py-3 bg-slate-50 border border-slate-200 rounded-2xl text-sm font-bold text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500"
                 />
-                <button
-                  onClick={handleJoinRoom}
-                  className="flex-1 bg-slate-700 hover:bg-slate-600 text-white font-bold py-3 rounded-xl border border-slate-600 transition active:scale-95"
-                >
-                  部屋に入る
-                </button>
               </div>
-            </div>
-          </div>
-        )}
 
-        {/* 2. ロビー画面 */}
-        {gameState === 'lobby' && (
-          <div className="flex flex-col gap-5">
-            <div className="flex justify-between items-center bg-slate-700/50 p-4 rounded-2xl border border-slate-600">
-              <div>
-                <span className="text-xs font-bold text-slate-400 block">部屋コード</span>
-                <span className="text-2xl font-black text-amber-400 tracking-wider">{roomCode}</span>
-              </div>
-              <div className="bg-white p-2 rounded-xl">
-                <QRCodeSVG value={shareUrl} size={64} />
-              </div>
-            </div>
-
-            {/* ジャンル選択（ホストのみ選択可） */}
-            {isHost && (
-              <div className="flex flex-col gap-2 bg-slate-700/30 p-3 rounded-xl border border-slate-700">
-                <label className="text-xs font-bold text-slate-400">出題ジャンル</label>
-                <select
-                  value={selectedCategory}
-                  onChange={(e) => setSelectedCategory(e.target.value)}
-                  className="bg-slate-700 border border-slate-600 rounded-lg px-3 py-2 text-sm font-bold text-white outline-none focus:border-amber-400"
-                >
-                  <option value="all">全教科MIX</option>
-                  <option value="国語">国語</option>
-                  <option value="算数・数学">算数・数学</option>
-                  <option value="理科">理科</option>
-                  <option value="社会">社会</option>
-                  <option value="雑学">雑学</option>
-                </select>
-              </div>
-            )}
-
-            {/* 参加メンバー一覧（ホスト・参加者双方に全員表示） */}
-            <div className="flex flex-col gap-2">
-              <span className="text-xs font-bold text-slate-400">参加メンバー ({players.length}人)</span>
-              <div className="flex flex-col gap-2 max-h-48 overflow-y-auto">
-                {players.map((p) => (
-                  <div
-                    key={p.id}
-                    className={`flex justify-between items-center px-4 py-3 rounded-xl border ${
-                      p.id === myId
-                        ? 'bg-amber-500/10 border-amber-500/40'
-                        : 'bg-slate-700 border-slate-600'
-                    }`}
+              <div className="p-4 bg-slate-50 rounded-2xl border border-slate-200 space-y-2.5">
+                <label className="text-xs font-bold text-slate-500 block">友達の部屋に入る</label>
+                <div className="flex gap-2">
+                  <input
+                    type="number"
+                    pattern="\d*"
+                    maxLength={4}
+                    placeholder="4桁の数字"
+                    value={inputCode}
+                    onChange={(e) => setInputCode(e.target.value)}
+                    className="w-full px-4 py-2.5 bg-white border border-slate-200 rounded-xl text-center text-lg font-black tracking-widest text-slate-800 focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                  />
+                  <button
+                    onClick={handleJoinRoom}
+                    className="px-5 py-2.5 bg-indigo-600 hover:bg-indigo-700 text-white text-xs font-bold rounded-xl whitespace-nowrap shadow-sm"
                   >
-                    <div className="flex items-center gap-2">
-                      <span className="font-bold">{p.name}</span>
-                      {p.id === myId && <span className="text-xs bg-amber-500 text-slate-950 font-black px-1.5 py-0.5 rounded">自分</span>}
-                    </div>
-                    {p.isHost && <span className="text-xs bg-slate-600 text-slate-300 font-bold px-2 py-0.5 rounded">ホスト</span>}
-                  </div>
-                ))}
-              </div>
-            </div>
-
-            {/* スタートボタン / 待機表示 */}
-            {isHost ? (
-              <button
-                onClick={handleStartGame}
-                className="w-full bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-slate-950 font-black py-4 rounded-xl shadow-lg transition active:scale-95"
-              >
-                全員揃った！対戦開始
-              </button>
-            ) : (
-              <div className="text-center py-4 bg-slate-700/30 rounded-xl border border-slate-700 text-sm font-bold text-slate-400 animate-pulse">
-                ホストがゲームを開始するのを待っています...
-              </div>
-            )}
-          </div>
-        )}
-
-        {/* 3. 問題取得中画面 */}
-        {gameState === 'loading' && (
-          <div className="flex flex-col items-center justify-center py-12 gap-4">
-            <div className="w-12 h-12 border-4 border-amber-400 border-t-transparent rounded-full animate-spin"></div>
-            <div className="text-center">
-              <h2 className="text-lg font-black text-amber-400">問題取得中…</h2>
-              <p className="text-xs text-slate-400 mt-1 font-bold">ちょっと待ってね！まもなく始まります！</p>
-            </div>
-          </div>
-        )}
-
-        {/* 4. クイズ出題・対戦画面 */}
-        {gameState === 'playing' && questions[currentIndex] && (
-          <div className="flex flex-col gap-4">
-            {/* 上部ステータス */}
-            <div className="flex justify-between items-center text-xs font-bold text-slate-400 border-b border-slate-700 pb-3">
-              <span className="bg-slate-700 px-2 py-1 rounded text-amber-400">
-                第 {currentIndex + 1} / {questions.length} 問
-              </span>
-              <span className="text-slate-400 font-bold">
-                {questions[currentIndex].category}
-              </span>
-              <span className={`text-base font-black ${timeLeft <= 5 ? 'text-red-500 animate-pulse' : 'text-white'}`}>
-                ⏱ {timeLeft}秒
-              </span>
-            </div>
-
-            {/* リアルタイム対戦状況バー */}
-            <div className="grid grid-cols-2 gap-2 bg-slate-700/40 p-2.5 rounded-xl border border-slate-700">
-              {players.map(p => (
-                <div key={p.id} className="flex justify-between items-center text-xs px-2 py-1 bg-slate-800 rounded-lg">
-                  <span className="truncate max-w-[80px] font-bold">
-                    {p.name} {p.id === myId ? '(自分)' : ''}
-                  </span>
-                  <span className="font-mono text-amber-400 font-bold">{p.score}pt</span>
+                    参加
+                  </button>
                 </div>
-              ))}
-            </div>
-
-            {/* 問題文 */}
-            <div className="py-2">
-              <p className="text-base font-bold leading-relaxed">
-                {questions[currentIndex].question}
-              </p>
-            </div>
-
-            {/* 選択肢ボタン */}
-            <div className="flex flex-col gap-2">
-              {questions[currentIndex].options.map((opt, idx) => {
-                let btnStyle = 'bg-slate-700 hover:bg-slate-600 border-slate-600 text-white';
-
-                if (isAnswered) {
-                  if (idx === questions[currentIndex].answerIndex) {
-                    btnStyle = 'bg-emerald-600 border-emerald-500 text-white';
-                  } else if (idx === selectedAnswer) {
-                    btnStyle = 'bg-rose-600 border-rose-500 text-white';
-                  } else {
-                    btnStyle = 'bg-slate-800 border-slate-700 opacity-40 text-slate-400';
-                  }
-                }
-
-                return (
-                  <button
-                    key={idx}
-                    disabled={isAnswered}
-                    onClick={() => handleSelectOption(idx)}
-                    className={`w-full text-left font-bold px-4 py-3 rounded-xl border transition ${btnStyle}`}
-                  >
-                    <span className="mr-2 opacity-60 font-mono">{idx + 1}.</span>
-                    {opt}
-                  </button>
-                );
-              })}
-            </div>
-
-            {/* 回答後の解説 ＆ ホストによる進行ボタン */}
-            {isAnswered && (
-              <div className="flex flex-col gap-3 mt-2 bg-slate-700/50 p-3 rounded-xl border border-slate-600">
-                <p className="text-xs text-slate-300">
-                  <strong className="text-amber-400">解説: </strong>
-                  {questions[currentIndex].explanation}
-                </p>
-
-                {isHost ? (
-                  <button
-                    onClick={handleNextQuestion}
-                    className="w-full bg-amber-500 hover:bg-amber-600 text-slate-950 font-black py-3 rounded-lg transition active:scale-95"
-                  >
-                    {currentIndex + 1 < questions.length ? '次の問題へ' : '結果発表を見る'}
-                  </button>
-                ) : (
-                  <div className="text-center text-xs font-bold text-slate-400 py-1">
-                    ホストが次の問題に進めるのを待っています...
-                  </div>
-                )}
               </div>
-            )}
+            </div>
+
+            <button
+              onClick={handleCreateRoom}
+              className="w-full py-4 bg-indigo-600 hover:bg-indigo-700 active:scale-[0.98] text-white font-bold text-sm rounded-2xl shadow-lg shadow-indigo-100 transition-all flex items-center justify-center gap-2"
+            >
+              <span>部屋を作成する（ホスト）</span>
+              <span>＋</span>
+            </button>
           </div>
         )}
 
-        {/* 5. 最終結果画面 */}
-        {gameState === 'result' && (
-          <div className="flex flex-col gap-6 text-center">
-            <div>
-              <h2 className="text-2xl font-black bg-gradient-to-r from-amber-400 to-orange-500 bg-clip-text text-transparent">
-                対戦結果発表！
-              </h2>
-              <p className="text-xs text-slate-400 mt-1">部屋コード: {roomCode}</p>
+        {/* 2. ロビー */}
+        {stage === 'lobby' && (
+          <div className="flex-1 p-6 flex flex-col justify-between overflow-y-auto">
+            <div className="text-center space-y-4">
+              <div>
+                <span className="text-xs font-bold text-slate-400">参加コード</span>
+                <div className="text-4xl font-black text-indigo-600 tracking-widest mt-0.5">{roomCode}</div>
+              </div>
+
+              <div className="bg-white p-3 rounded-2xl border border-slate-200 shadow-sm inline-block mx-auto">
+                <QRCodeSVG value={shareUrl} size={130} level="M" />
+                <p className="text-[10px] text-slate-400 font-bold mt-1.5">カメラで読み取って即参加</p>
+              </div>
+
+              {isHost && (
+                <div className="bg-slate-50 p-3 rounded-2xl border border-slate-200 text-left space-y-2">
+                  <div className="flex justify-between items-center text-xs font-bold text-slate-600">
+                    <span>ジャンル</span>
+                    <select
+                      value={selectedCategory}
+                      onChange={(e) => setSelectedCategory(e.target.value)}
+                      className="text-xs bg-white border border-slate-200 rounded-lg px-2 py-1 font-semibold text-slate-700"
+                    >
+                      <option value="all">全教科MIX</option>
+                      <option value="国語">国語</option>
+                      <option value="算数・数学">算数・数学</option>
+                      <option value="理科">理科</option>
+                      <option value="社会">社会</option>
+                      <option value="雑学">雑学</option>
+                    </select>
+                  </div>
+                  <div className="flex justify-between items-center text-xs font-bold text-slate-600">
+                    <span>出題数</span>
+                    <div className="flex gap-1.5">
+                      {[5, 10].map((cnt) => (
+                        <button
+                          key={cnt}
+                          onClick={() => setQuestionCount(cnt)}
+                          className={`px-2.5 py-0.5 rounded-lg border text-xs font-bold ${
+                            questionCount === cnt
+                              ? 'bg-indigo-600 text-white border-indigo-600'
+                              : 'bg-white text-slate-600 border-slate-200'
+                          }`}
+                        >
+                          {cnt}問
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              <div className="text-left">
+                <div className="text-xs font-bold text-slate-500 mb-2 flex justify-between">
+                  <span>参加中のメンバー ({players.length}人)</span>
+                </div>
+                <div className="space-y-1.5 max-h-32 overflow-y-auto">
+                  {players.map((p) => (
+                    <div
+                      key={p.id}
+                      className="flex items-center justify-between p-2.5 bg-slate-50 border border-slate-200 rounded-xl text-xs"
+                    >
+                      <span className="font-bold text-slate-700">
+                        {p.name} {p.id === playerIdRef.current && '(自分)'}
+                      </span>
+                      {p.isHost && (
+                        <span className="px-2 py-0.5 bg-amber-100 text-amber-700 rounded-md font-bold text-[10px]">
+                          HOST
+                        </span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </div>
             </div>
 
-            {/* 全員のランキング・スコア結果 */}
-            <div className="flex flex-col gap-2">
-              {[...players]
-                .sort((a, b) => b.score - a.score)
-                .map((p, idx) => (
+            <div className="pt-3">
+              {isHost ? (
+                <button
+                  disabled={isGenerating}
+                  onClick={handleHostStartGame}
+                  className="w-full py-4 bg-emerald-600 hover:bg-emerald-700 active:scale-[0.98] text-white font-bold text-sm rounded-2xl shadow-lg shadow-emerald-100 transition-all disabled:opacity-50"
+                >
+                  {isGenerating ? '問題取得中…ちょっと待ってね！' : '全員揃ったので対戦開始！'}
+                </button>
+              ) : (
+                <div className="p-3 text-center bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-500">
+                  ホストが対戦を開始するのを待っています…
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+
+        {/* 3. クイズ対決中 */}
+        {stage === 'playing' && (
+          currentQ ? (
+            <div className="flex-1 flex flex-col justify-between p-5">
+              <div>
+                <div className="flex items-center justify-between text-xs font-bold text-slate-500 mb-2">
+                  <span>
+                    第 {currentIndex + 1} / {questions.length} 問
+                  </span>
+                  <span className="text-indigo-600 font-black text-sm">
+                    {players.find((p) => p.id === playerIdRef.current)?.score || 0} pt
+                  </span>
+                </div>
+
+                <div className="w-full h-1.5 bg-slate-100 rounded-full overflow-hidden mb-3">
                   <div
-                    key={p.id}
-                    className={`flex justify-between items-center p-3 rounded-xl border ${
-                      idx === 0
-                        ? 'bg-amber-500/20 border-amber-500/60 font-black'
-                        : 'bg-slate-700 border-slate-600'
+                    className={`h-full transition-all duration-1000 linear ${
+                      timeLeft <= 3 ? 'bg-rose-500 animate-pulse' : 'bg-indigo-500'
+                    }`}
+                    style={{ width: `${(timeLeft / 15) * 100}%` }}
+                  />
+                </div>
+
+                <div className="flex items-center justify-between mb-2.5">
+                  <div className="flex items-center gap-1.5">
+                    <span className="px-2 py-0.5 rounded-md bg-slate-100 border border-slate-200 text-[11px] font-bold text-slate-600">
+                      {currentQ.category || 'クイズ'}
+                    </span>
+                    <span className="px-2 py-0.5 rounded-md bg-indigo-50 border border-indigo-100 text-[11px] font-bold text-indigo-600">
+                      {currentQ.gradeLevel || '一般'}
+                    </span>
+                  </div>
+                  <span className="text-xs font-black text-slate-500">{timeLeft}s</span>
+                </div>
+
+                <div className="bg-slate-50 border border-slate-200 rounded-2xl p-4 min-h-[90px] flex items-center shadow-inner">
+                  <h2 className="text-sm sm:text-base font-bold text-slate-800 leading-relaxed whitespace-pre-line">
+                    {currentQ.question}
+                  </h2>
+                </div>
+              </div>
+
+              <div className="space-y-2.5 my-2">
+                {currentQ.options && currentQ.options.map((opt: string, idx: number) => {
+                  let btnStyle = 'bg-white border-slate-200 text-slate-700 shadow-sm';
+                  if (isAnswered) {
+                    if (idx === currentQ.answerIndex) {
+                      btnStyle = 'bg-emerald-500 border-emerald-600 text-white font-bold ring-2 ring-emerald-200';
+                    } else if (selectedOption === idx) {
+                      btnStyle = 'bg-rose-500 border-rose-600 text-white font-bold';
+                    } else {
+                      btnStyle = 'bg-slate-50 border-slate-200 text-slate-300 opacity-60';
+                    }
+                  }
+
+                  return (
+                    <button
+                      key={idx}
+                      disabled={isAnswered}
+                      onClick={() => handleAnswer(idx)}
+                      className={`w-full p-3.5 rounded-2xl border text-left text-xs sm:text-sm font-semibold transition-all flex items-center gap-3 ${btnStyle} active:scale-[0.98]`}
+                    >
+                      <span className="w-6 h-6 rounded-lg bg-slate-100 text-slate-500 flex items-center justify-center text-xs font-black">
+                        {['A', 'B', 'C', 'D'][idx]}
+                      </span>
+                      <span className="flex-1">{opt}</span>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {isAnswered && (
+                <div className="bg-slate-50 border border-slate-200 p-3.5 rounded-2xl">
+                  <div className="text-xs font-bold mb-1 flex justify-between">
+                    <span className={selectedOption === currentQ.answerIndex ? 'text-emerald-600' : 'text-rose-600'}>
+                      {selectedOption === currentQ.answerIndex ? '⭕ 正解！' : '❌ 不正解…'}
+                    </span>
+                    <span className="text-[10px] text-slate-400">出題元: {questionSource}</span>
+                  </div>
+                  <p className="text-[11px] text-slate-600 mb-3">{currentQ.explanation}</p>
+
+                  {isHost ? (
+                    <button
+                      onClick={handleHostNext}
+                      className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-700 active:scale-[0.98] text-white rounded-xl text-xs font-bold transition-all"
+                    >
+                      {currentIndex + 1 < questions.length ? '全員を次の問題へ進める →' : '対戦結果を見る'}
+                    </button>
+                  ) : (
+                    <p className="text-[11px] text-center text-slate-400 font-bold py-1">
+                      ホストが次の問題に進めるのを待っています…
+                    </p>
+                  )}
+                </div>
+              )}
+            </div>
+          ) : (
+            <div className="flex-1 flex items-center justify-center p-6 text-center">
+              <p className="text-sm font-bold text-slate-500">問題データを読み込み中...</p>
+            </div>
+          )
+        )}
+
+        {/* 4. 最終リザルト発表 */}
+        {stage === 'final_result' && (
+          <div className="flex-1 p-6 flex flex-col justify-between overflow-y-auto">
+            <div className="text-center pt-2">
+              <span className="text-3xl">🏆</span>
+              <h2 className="text-xl font-black text-slate-800 mt-2">バトル終了！</h2>
+              <p className="text-xs text-slate-500 mt-0.5">対戦結果ランキング</p>
+
+              <div className="mt-5 space-y-2">
+                {rankedPlayers.map((player, rank) => (
+                  <div
+                    key={player.id}
+                    className={`flex items-center justify-between p-3.5 rounded-2xl border text-xs font-bold ${
+                      rank === 0
+                        ? 'bg-amber-50/80 border-amber-300 text-amber-900 shadow-sm'
+                        : 'bg-white border-slate-200 text-slate-700'
                     }`}
                   >
                     <div className="flex items-center gap-3">
-                      <span className={`w-6 h-6 flex items-center justify-center rounded-full text-xs font-black ${
-                        idx === 0 ? 'bg-amber-400 text-slate-950' : 'bg-slate-600 text-slate-300'
-                      }`}>
-                        {idx + 1}
+                      <span
+                        className={`w-6 h-6 rounded-full flex items-center justify-center text-xs font-black ${
+                          rank === 0 ? 'bg-amber-400 text-white' : 'bg-slate-100 text-slate-500'
+                        }`}
+                      >
+                        {rank + 1}
                       </span>
-                      <span className="font-bold">
-                        {p.name} {p.id === myId ? '(自分)' : ''}
+                      <span>
+                        {player.name} {player.id === playerIdRef.current && '(自分)'}
                       </span>
                     </div>
-                    <span className="font-mono text-base font-black text-amber-400">{p.score} pt</span>
+                    <div className="text-sm font-black text-indigo-600">
+                      {player.score} <span className="text-[10px] text-slate-400">pt</span>
+                    </div>
                   </div>
                 ))}
+              </div>
             </div>
 
-            {/* 部屋を維持してもう一度遊ぶボタン */}
-            <div className="flex flex-col gap-2">
+            <div className="space-y-2 mt-6">
               {isHost ? (
                 <button
-                  onClick={handleRematch}
-                  className="w-full bg-gradient-to-r from-amber-500 to-orange-500 hover:from-amber-600 hover:to-orange-600 text-slate-950 font-black py-4 rounded-xl shadow-lg transition active:scale-95"
+                  onClick={handleHostRematch}
+                  className="w-full py-3.5 bg-emerald-600 hover:bg-emerald-700 active:scale-[0.98] text-white font-bold text-sm rounded-2xl shadow-lg shadow-emerald-100 transition-all"
                 >
-                  同じ部屋でもう一度遊ぶ
+                  同じ部屋でもう一度遊ぶ 🔄
                 </button>
               ) : (
-                <div className="text-sm font-bold text-slate-400 bg-slate-700/40 py-3 rounded-xl border border-slate-700 animate-pulse">
-                  ホストが再戦の準備をするのを待っています...
+                <div className="p-3 text-center bg-slate-50 border border-slate-200 rounded-xl text-xs font-bold text-slate-500">
+                  ホストが再戦を開始するのを待っています…
                 </div>
               )}
 
               <button
                 onClick={() => {
                   if (channelRef.current) supabase.removeChannel(channelRef.current);
-                  setGameState('home');
+                  setStage('home');
+                  setRoomCode('');
+                  setPlayers([]);
                 }}
-                className="w-full bg-slate-700 hover:bg-slate-600 text-white font-bold py-3 rounded-xl border border-slate-600 transition"
+                className="w-full py-3 bg-slate-100 hover:bg-slate-200 text-slate-600 font-bold text-xs rounded-2xl transition-all"
               >
-                部屋を退出する
+                部屋を退出してトップに戻る
               </button>
             </div>
           </div>
         )}
-
       </div>
     </div>
   );
