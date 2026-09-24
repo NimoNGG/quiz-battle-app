@@ -60,6 +60,9 @@ export default function MultiPlayerQuizApp() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [questionSource, setQuestionSource] = useState('');
 
+  // 切り替えエフェクト状態
+  const [transitionTitle, setTransitionTitle] = useState<string | null>(null);
+
   // プレイ中状態
   const [timeLeft, setTimeLeft] = useState(15);
   const [selectedOption, setSelectedOption] = useState<number | null>(null);
@@ -81,6 +84,25 @@ export default function MultiPlayerQuizApp() {
     }
   }, []);
 
+  // 部屋から退出する共通処理
+  const handleLeaveRoom = () => {
+    if (stage !== 'home') {
+      const confirmLeave = window.confirm('部屋を退出してトップに戻りますか？');
+      if (!confirmLeave) return;
+    }
+    if (channelRef.current) {
+      supabase.removeChannel(channelRef.current);
+      channelRef.current = null;
+    }
+    clearInterval(timerRef.current);
+    setStage('home');
+    setRoomCode('');
+    setPlayers([]);
+    setQuestions([]);
+    setIsGenerating(false);
+    setTransitionTitle(null);
+  };
+
   // ブロードキャスト送信
   const broadcastMessage = (event: string, payload: any) => {
     if (!channelRef.current) return;
@@ -93,6 +115,14 @@ export default function MultiPlayerQuizApp() {
     } catch (e) {
       console.warn('Realtime送信失敗:', e);
     }
+  };
+
+  // 切り替えエフェクト付きで問題を表示
+  const triggerQuestionTransition = (index: number) => {
+    setTransitionTitle(`第 ${index + 1} 問`);
+    setTimeout(() => {
+      setTransitionTitle(null);
+    }, 1200);
   };
 
   // ゲーム開始共通処理
@@ -109,6 +139,8 @@ export default function MultiPlayerQuizApp() {
     setCombo(0);
     setTimeLeft(15);
     setStage('playing');
+    setPlayers((prev) => prev.map((p) => ({ ...p, answered: false, score: 0 })));
+    triggerQuestionTransition(0);
   };
 
   const connectToRoom = (code: string, hostFlag: boolean, initialUserName: string) => {
@@ -123,13 +155,11 @@ export default function MultiPlayerQuizApp() {
     });
 
     channel
-      // 誰かが入室したとき
       .on('broadcast', { event: 'player_join' }, ({ payload }) => {
         setPlayers((prev) => {
           if (prev.some((p) => p.id === payload.id)) return prev;
           return [...prev, payload];
         });
-        // 既存メンバーは新しく入ってきた人に自分の情報を送り返して名簿を同期
         if (payload.id !== playerIdRef.current) {
           channel.send({
             type: 'broadcast',
@@ -144,7 +174,6 @@ export default function MultiPlayerQuizApp() {
           });
         }
       })
-      // 既存メンバーからの同期受信用
       .on('broadcast', { event: 'room_sync' }, ({ payload }) => {
         setPlayers((prev) => {
           if (prev.some((p) => p.id === payload.id)) return prev;
@@ -166,11 +195,11 @@ export default function MultiPlayerQuizApp() {
         setTimeLeft(15);
         setStage('playing');
         setPlayers((prev) => prev.map((p) => ({ ...p, answered: false })));
+        triggerQuestionTransition(payload.nextIndex);
       })
       .on('broadcast', { event: 'game_finish' }, () => {
         setStage('final_result');
       })
-      // 同じ部屋で再戦（全員一斉にロビー復帰）
       .on('broadcast', { event: 'room_rematch' }, () => {
         setQuestions([]);
         setCurrentIndex(0);
@@ -206,7 +235,7 @@ export default function MultiPlayerQuizApp() {
     channelRef.current = channel;
   };
 
-  // 部屋作成（ホスト1人でも即座に一覧に登録）
+  // 部屋作成
   const handleCreateRoom = () => {
     const validName = userName.trim() || 'ホスト';
     const random4Digit = Math.floor(1000 + Math.random() * 9000).toString();
@@ -227,7 +256,7 @@ export default function MultiPlayerQuizApp() {
     connectToRoom(random4Digit, true, validName);
   };
 
-  // 部屋参加（参加者自身も即座に一覧に登録）
+  // 部屋参加
   const handleJoinRoom = () => {
     const validName = userName.trim() || 'ゲスト';
     if (!/^\d{4}$/.test(inputCode)) return alert('4桁の半角数字を入力してください');
@@ -266,15 +295,12 @@ export default function MultiPlayerQuizApp() {
         return;
       }
 
-      // 他のプレイヤーへ配信
       broadcastMessage('game_start', {
         questions: data.questions,
         source: data.source,
       });
 
-      // ホスト自身も直ちにクイズ画面へ遷移
       startQuizGame(data.questions, data.source);
-
     } catch (e: any) {
       alert(`通信エラーが発生しました: ${e.message}`);
     } finally {
@@ -282,7 +308,7 @@ export default function MultiPlayerQuizApp() {
     }
   };
 
-  // 部屋を維持してもう一度遊ぶ（ホストが発火）
+  // 部屋を維持してもう一度遊ぶ
   const handleHostRematch = () => {
     if (!isHost) return;
     broadcastMessage('room_rematch', {});
@@ -304,7 +330,7 @@ export default function MultiPlayerQuizApp() {
 
   // 制限時間カウントダウン
   useEffect(() => {
-    if (stage !== 'playing' || isAnswered) return;
+    if (stage !== 'playing' || isAnswered || transitionTitle) return;
 
     timerRef.current = setInterval(() => {
       setTimeLeft((prev) => {
@@ -319,7 +345,7 @@ export default function MultiPlayerQuizApp() {
     }, 1000);
 
     return () => clearInterval(timerRef.current);
-  }, [stage, isAnswered, currentIndex]);
+  }, [stage, isAnswered, currentIndex, transitionTitle]);
 
   // 回答処理
   const handleAnswer = (idx: number) => {
@@ -339,11 +365,10 @@ export default function MultiPlayerQuizApp() {
       gainedPoints = 100 + timeBonus + comboBonus;
       setCombo((prev) => prev + 1);
     } else {
-      playTone('wrong');
+      if (idx !== -1) playTone('wrong');
       setCombo(0);
     }
 
-    // 自身のスコアを更新
     setPlayers((prev) =>
       prev.map((p) =>
         p.id === playerIdRef.current
@@ -371,11 +396,22 @@ export default function MultiPlayerQuizApp() {
       setIsAnswered(false);
       setTimeLeft(15);
       setPlayers((prev) => prev.map((p) => ({ ...p, answered: false })));
+      triggerQuestionTransition(nextIdx);
     } else {
       broadcastMessage('game_finish', {});
       setStage('final_result');
     }
   };
+
+  // 全員が回答完了したかを判定
+  const allPlayersAnswered = useMemo(() => {
+    if (players.length === 0) return true;
+    return players.every((p) => p.answered);
+  }, [players]);
+
+  const answeredCount = useMemo(() => {
+    return players.filter((p) => p.answered).length;
+  }, [players]);
 
   const rankedPlayers = useMemo(() => {
     return [...players].sort((a, b) => b.score - a.score);
@@ -387,6 +423,20 @@ export default function MultiPlayerQuizApp() {
   return (
     <div className="min-h-screen bg-slate-100 flex items-center justify-center p-3 sm:p-6 font-sans">
       <div className="w-full max-w-md bg-white rounded-3xl shadow-xl border border-slate-200 overflow-hidden flex flex-col min-h-[640px] relative">
+        
+        {/* 問題切り替え時の暗転＆タイトルオーバーレイ（第1問〜第10問） */}
+        {transitionTitle && (
+          <div className="absolute inset-0 bg-slate-900/85 z-50 flex flex-col items-center justify-center animate-fade-in text-white pointer-events-none">
+            <span className="text-xs font-bold text-amber-400 tracking-widest uppercase mb-1">
+              QUESTION
+            </span>
+            <div className="text-4xl font-black tracking-wider drop-shadow-md scale-105 transition-transform duration-300">
+              {transitionTitle}
+            </div>
+            <div className="mt-3 w-12 h-1 bg-amber-400 rounded-full animate-pulse"></div>
+          </div>
+        )}
+
         {/* ヘッダー */}
         <div className="px-5 py-3.5 bg-white border-b border-slate-100 flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -394,8 +444,16 @@ export default function MultiPlayerQuizApp() {
             <span className="font-black text-slate-800 text-sm tracking-wide">Q-Battle Online</span>
           </div>
           {roomCode && (
-            <div className="text-xs bg-indigo-50 border border-indigo-200 text-indigo-700 font-bold px-2.5 py-1 rounded-full">
-              部屋: <span className="tracking-widest">{roomCode}</span>
+            <div className="flex items-center gap-2">
+              <div className="text-xs bg-indigo-50 border border-indigo-200 text-indigo-700 font-bold px-2.5 py-1 rounded-full">
+                部屋: <span className="tracking-widest">{roomCode}</span>
+              </div>
+              <button
+                onClick={handleLeaveRoom}
+                className="text-[11px] font-bold text-slate-500 hover:text-rose-600 bg-slate-50 hover:bg-rose-50 border border-slate-200 hover:border-rose-200 px-2 py-1 rounded-full transition-all"
+              >
+                退出
+              </button>
             </div>
           )}
         </div>
@@ -559,9 +617,14 @@ export default function MultiPlayerQuizApp() {
                   <span>
                     第 {currentIndex + 1} / {questions.length} 問
                   </span>
-                  <span className="text-indigo-600 font-black text-sm">
-                    {players.find((p) => p.id === playerIdRef.current)?.score || 0} pt
-                  </span>
+                  <div className="flex items-center gap-3">
+                    <span className="text-[11px] font-semibold text-slate-400">
+                      回答: {answeredCount}/{players.length}人
+                    </span>
+                    <span className="text-indigo-600 font-black text-sm">
+                      {players.find((p) => p.id === playerIdRef.current)?.score || 0} pt
+                    </span>
+                  </div>
                 </div>
 
                 <div className="w-full h-1.5 bg-slate-100 rounded-full overflow-hidden mb-3">
@@ -633,14 +696,23 @@ export default function MultiPlayerQuizApp() {
 
                   {isHost ? (
                     <button
+                      disabled={!allPlayersAnswered}
                       onClick={handleHostNext}
-                      className="w-full py-2.5 bg-indigo-600 hover:bg-indigo-700 active:scale-[0.98] text-white rounded-xl text-xs font-bold transition-all"
+                      className={`w-full py-2.5 rounded-xl text-xs font-bold transition-all ${
+                        allPlayersAnswered
+                          ? 'bg-indigo-600 hover:bg-indigo-700 active:scale-[0.98] text-white'
+                          : 'bg-slate-200 text-slate-400 cursor-not-allowed'
+                      }`}
                     >
-                      {currentIndex + 1 < questions.length ? '全員を次の問題へ進める →' : '対戦結果を見る'}
+                      {allPlayersAnswered
+                        ? (currentIndex + 1 < questions.length ? '全員の回答完了！ 次の問題へ進める →' : '全員の回答完了！ 対戦結果を見る')
+                        : `他のメンバーの回答を待っています… (${answeredCount}/${players.length}人)`}
                     </button>
                   ) : (
                     <p className="text-[11px] text-center text-slate-400 font-bold py-1">
-                      ホストが次の問題に進めるのを待っています…
+                      {allPlayersAnswered
+                        ? '全員の回答が完了しました。ホストの進行を待っています…'
+                        : `全員の回答待ちです… (${answeredCount}/${players.length}人)`}
                     </p>
                   )}
                 </div>
@@ -706,12 +778,7 @@ export default function MultiPlayerQuizApp() {
               )}
 
               <button
-                onClick={() => {
-                  if (channelRef.current) supabase.removeChannel(channelRef.current);
-                  setStage('home');
-                  setRoomCode('');
-                  setPlayers([]);
-                }}
+                onClick={handleLeaveRoom}
                 className="w-full py-3 bg-slate-100 hover:bg-slate-200 text-slate-600 font-bold text-xs rounded-2xl transition-all"
               >
                 部屋を退出してトップに戻る
