@@ -71,6 +71,26 @@ export default function QuizApp() {
     return () => clearInterval(timer);
   }, [gameState, timeLeft, isAnswered]);
 
+  // Presence同期処理の共通ヘルパー
+  const syncPresenceState = (channel: any) => {
+    const state = channel.presenceState();
+    const currentPlayers: Player[] = [];
+    Object.keys(state).forEach(key => {
+      const presenceList = state[key] as any[];
+      if (presenceList && presenceList.length > 0) {
+        const user = presenceList[0];
+        currentPlayers.push({
+          id: user.id,
+          name: user.name,
+          score: user.score || 0,
+          isHost: user.isHost,
+          hasAnswered: user.hasAnswered || false,
+        });
+      }
+    });
+    setPlayers(currentPlayers);
+  };
+
   // Realtimeチャンネルの接続と監視
   const joinRoomChannel = (code: string, asHost: boolean) => {
     if (channelRef.current) {
@@ -85,25 +105,17 @@ export default function QuizApp() {
       },
     });
 
-    // 1. Presence 同期（参加者一覧の同期）
-    channel.on('presence', { event: 'sync' }, () => {
-      const state = channel.presenceState();
-      const currentPlayers: Player[] = [];
-      Object.keys(state).forEach(key => {
-        const presenceList = state[key] as any[];
-        if (presenceList && presenceList.length > 0) {
-          const user = presenceList[0];
-          currentPlayers.push({
-            id: user.id,
-            name: user.name,
-            score: user.score || 0,
-            isHost: user.isHost,
-            hasAnswered: user.hasAnswered || false,
-          });
-        }
+    // 1. Presence 同期（参加者・ホスト双方で完全同期）
+    channel
+      .on('presence', { event: 'sync' }, () => {
+        syncPresenceState(channel);
+      })
+      .on('presence', { event: 'join' }, () => {
+        syncPresenceState(channel);
+      })
+      .on('presence', { event: 'leave' }, () => {
+        syncPresenceState(channel);
       });
-      setPlayers(currentPlayers);
-    });
 
     // 2. Broadcast イベントの受信
     channel
@@ -117,7 +129,6 @@ export default function QuizApp() {
         setTimeLeft(15);
         setGameState('playing');
 
-        // presence のスコアリセット
         channel.track({
           id: myId,
           name: playerName,
@@ -133,7 +144,6 @@ export default function QuizApp() {
         setIsAnswered(false);
         setTimeLeft(15);
 
-        // presenceの回答状況を更新
         channel.track({
           id: myId,
           name: playerName,
@@ -148,7 +158,7 @@ export default function QuizApp() {
           prev.map(p => (p.id === payload.id ? { ...p, score: payload.score, hasAnswered: true } : p))
         );
       })
-      // 同じ部屋で再戦（リセット）
+      // 同じ部屋で再戦（全員一斉にロビーへ復帰）
       .on('broadcast', { event: 'rematch' }, () => {
         setCurrentIndex(0);
         setSelectedAnswer(null);
@@ -166,7 +176,7 @@ export default function QuizApp() {
         });
       });
 
-    // 接続完了後に Presence を送信
+    // 接続完了後に確実にPresence送信
     channel.subscribe(async (status) => {
       if (status === 'SUBSCRIBED') {
         await channel.track({
@@ -216,7 +226,6 @@ export default function QuizApp() {
       const data = await res.json();
 
       if (data.questions && data.questions.length > 0) {
-        // 全員へ一斉に開始イベントを通知
         channelRef.current.send({
           type: 'broadcast',
           event: 'start_game',
@@ -251,7 +260,6 @@ export default function QuizApp() {
     const newScore = isCorrect ? myScore + Math.max(10, timeLeft * 10) : myScore;
     if (isCorrect) setMyScore(newScore);
 
-    // 自分のスコアと回答完了状態を全員へ送信
     channelRef.current.send({
       type: 'broadcast',
       event: 'update_score',
@@ -293,7 +301,6 @@ export default function QuizApp() {
       setIsAnswered(false);
       setTimeLeft(15);
     } else {
-      // 最終結果へ
       setGameState('result');
     }
   };
@@ -403,7 +410,7 @@ export default function QuizApp() {
               </div>
             )}
 
-            {/* 参加メンバー一覧（ホスト・参加者両方に全員映る） */}
+            {/* 参加メンバー一覧（ホスト・参加者双方に全員表示） */}
             <div className="flex flex-col gap-2">
               <span className="text-xs font-bold text-slate-400">参加メンバー ({players.length}人)</span>
               <div className="flex flex-col gap-2 max-h-48 overflow-y-auto">
@@ -442,7 +449,7 @@ export default function QuizApp() {
           </div>
         )}
 
-        {/* 3. 問題取得中画面（ご要望の「ちょっと待ってね！」演出） */}
+        {/* 3. 問題取得中画面 */}
         {gameState === 'loading' && (
           <div className="flex flex-col items-center justify-center py-12 gap-4">
             <div className="w-12 h-12 border-4 border-amber-400 border-t-transparent rounded-full animate-spin"></div>
@@ -469,7 +476,7 @@ export default function QuizApp() {
               </span>
             </div>
 
-            {/* リアルタイム対戦状況バー（全員の状況が見える） */}
+            {/* リアルタイム対戦状況バー */}
             <div className="grid grid-cols-2 gap-2 bg-slate-700/40 p-2.5 rounded-xl border border-slate-700">
               {players.map(p => (
                 <div key={p.id} className="flex justify-between items-center text-xs px-2 py-1 bg-slate-800 rounded-lg">
@@ -495,9 +502,9 @@ export default function QuizApp() {
 
                 if (isAnswered) {
                   if (idx === questions[currentIndex].answerIndex) {
-                    btnStyle = 'bg-emerald-600 border-emerald-500 text-white'; // 正解
+                    btnStyle = 'bg-emerald-600 border-emerald-500 text-white';
                   } else if (idx === selectedAnswer) {
-                    btnStyle = 'bg-rose-600 border-rose-500 text-white'; // 不正解
+                    btnStyle = 'bg-rose-600 border-rose-500 text-white';
                   } else {
                     btnStyle = 'bg-slate-800 border-slate-700 opacity-40 text-slate-400';
                   }
@@ -542,7 +549,7 @@ export default function QuizApp() {
           </div>
         )}
 
-        {/* 5. 最終結果画面（全員の結果を表示 ＆ 部屋維持再戦） */}
+        {/* 5. 最終結果画面 */}
         {gameState === 'result' && (
           <div className="flex flex-col gap-6 text-center">
             <div>
