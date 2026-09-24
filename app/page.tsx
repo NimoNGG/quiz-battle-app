@@ -73,6 +73,12 @@ export default function MultiPlayerQuizApp() {
   const timerRef = useRef<any>(null);
   const playerIdRef = useRef('');
   const joinedAtRef = useRef<number>(0);
+  const playersRef = useRef<any[]>([]);
+
+  // 最新の players を常に参照できるように同期
+  useEffect(() => {
+    playersRef.current = players;
+  }, [players]);
 
   useEffect(() => {
     playerIdRef.current = 'player_' + Math.random().toString(36).substring(2, 9);
@@ -145,6 +151,15 @@ export default function MultiPlayerQuizApp() {
     setTimeLeft(15);
     setStage('playing');
 
+    // プレイヤー全員の回答状態をリセット
+    setPlayers((prev) =>
+      prev.map((p) => ({
+        ...p,
+        score: 0,
+        answered: false,
+      }))
+    );
+
     if (channelRef.current) {
       channelRef.current.track({
         id: playerIdRef.current,
@@ -159,7 +174,7 @@ export default function MultiPlayerQuizApp() {
     triggerQuestionTransition(0);
   };
 
-  // Presence state から players 配列を同期作成 & 最古参（一番最初に入った人）を自動でホストに判定
+  // Presence state から players 配列を同期作成（回答状況やスコアを巻き戻さず安全にマージ）
   const syncPlayersFromPresence = (channel: any) => {
     const presenceState = channel.presenceState();
     const activeList: any[] = [];
@@ -179,12 +194,18 @@ export default function MultiPlayerQuizApp() {
 
     setIsHost(amIHost);
 
-    const updatedList = activeList.map((p) => ({
-      ...p,
-      isHost: p.id === oldestPlayerId,
-    }));
-
-    setPlayers(updatedList);
+    // ★重要: 現在保持している answered 状態と score を Presence の古い状態で上書きさせない
+    setPlayers((prev) => {
+      return activeList.map((p) => {
+        const existing = prev.find((old) => old.id === p.id);
+        return {
+          ...p,
+          isHost: p.id === oldestPlayerId,
+          score: existing ? Math.max(existing.score || 0, p.score || 0) : (p.score || 0),
+          answered: existing ? existing.answered : (p.answered || false),
+        };
+      });
+    });
   };
 
   const connectToRoom = (code: string, initialUserName: string, forceHost = false) => {
@@ -216,7 +237,11 @@ export default function MultiPlayerQuizApp() {
       })
       .on('broadcast', { event: 'player_answered' }, ({ payload }) => {
         setPlayers((prev) =>
-          prev.map((p) => (p.id === payload.id ? { ...p, score: payload.score, answered: true } : p))
+          prev.map((p) =>
+            p.id === payload.id
+              ? { ...p, score: payload.score, answered: true }
+              : p
+          )
         );
       })
       .on('broadcast', { event: 'next_question' }, ({ payload }) => {
@@ -225,10 +250,11 @@ export default function MultiPlayerQuizApp() {
         setIsAnswered(false);
         setTimeLeft(15);
         setStage('playing');
+        // 次の問題に進んだ時だけ全員の回答状態をクリア
         setPlayers((prev) => prev.map((p) => ({ ...p, answered: false })));
 
         if (channelRef.current) {
-          const myP = players.find((p) => p.id === playerIdRef.current);
+          const myP = playersRef.current.find((p) => p.id === playerIdRef.current);
           channelRef.current.track({
             id: playerIdRef.current,
             name: initialUserName,
@@ -252,6 +278,14 @@ export default function MultiPlayerQuizApp() {
         setTimeLeft(15);
         setStage('lobby');
 
+        setPlayers((prev) =>
+          prev.map((p) => ({
+            ...p,
+            score: 0,
+            answered: false,
+          }))
+        );
+
         if (channelRef.current) {
           channelRef.current.track({
             id: playerIdRef.current,
@@ -265,7 +299,6 @@ export default function MultiPlayerQuizApp() {
       })
       .subscribe(async (status) => {
         if (status === 'SUBSCRIBED') {
-          // 初期トラックを送信（部屋作成を押した人は最初からjoinedAtを少し古く設定して確実にホスト化）
           const effectiveJoinedAt = forceHost ? joinedAtRef.current - 1000 : joinedAtRef.current;
           joinedAtRef.current = effectiveJoinedAt;
 
@@ -283,7 +316,7 @@ export default function MultiPlayerQuizApp() {
     channelRef.current = channel;
   };
 
-  // 部屋作成（ホストとして入室）
+  // 部屋作成
   const handleCreateRoom = () => {
     const validName = userName.trim() || 'ホスト';
     const random4Digit = Math.floor(1000 + Math.random() * 9000).toString();
@@ -305,7 +338,7 @@ export default function MultiPlayerQuizApp() {
     connectToRoom(random4Digit, validName, true);
   };
 
-  // 友達の部屋に入る（4桁なら何でも入室可能 ＆ 一番最初の人が自動でホストになる）
+  // 友達の部屋に入る
   const handleJoinRoom = () => {
     const validName = userName.trim() || 'ゲスト';
     if (!/^\d{4}$/.test(inputCode)) return alert('4桁の半角数字を入力してください');
@@ -313,7 +346,6 @@ export default function MultiPlayerQuizApp() {
     setRoomCode(inputCode);
     setStage('lobby');
 
-    // 接続時に Presence の在席確認を行い、誰もいなければ自分がホストになる
     connectToRoom(inputCode, validName, false);
   };
 
@@ -359,6 +391,13 @@ export default function MultiPlayerQuizApp() {
     setCombo(0);
     setTimeLeft(15);
     setStage('lobby');
+    setPlayers((prev) =>
+      prev.map((p) => ({
+        ...p,
+        score: 0,
+        answered: false,
+      }))
+    );
   };
 
   // 制限時間カウントダウン
@@ -402,31 +441,21 @@ export default function MultiPlayerQuizApp() {
       setCombo(0);
     }
 
+    const currentMyScore = (playersRef.current.find((p) => p.id === playerIdRef.current)?.score || 0) + gainedPoints;
+
+    // 自分のステートを即時更新
     setPlayers((prev) =>
       prev.map((p) =>
         p.id === playerIdRef.current
-          ? { ...p, score: p.score + gainedPoints, answered: true }
+          ? { ...p, score: currentMyScore, answered: true }
           : p
       )
     );
 
-    const myCurrent = players.find((p) => p.id === playerIdRef.current);
-    const newScore = (myCurrent ? myCurrent.score : 0) + gainedPoints;
-
-    if (channelRef.current) {
-      channelRef.current.track({
-        id: playerIdRef.current,
-        name: userName.trim() || 'プレイヤー',
-        score: newScore,
-        isHost,
-        answered: true,
-        joinedAt: joinedAtRef.current,
-      });
-    }
-
+    // 全員に即座に通知
     broadcastMessage('player_answered', {
       id: playerIdRef.current,
-      score: newScore,
+      score: currentMyScore,
     });
   };
 
