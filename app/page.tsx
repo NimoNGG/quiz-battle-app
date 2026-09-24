@@ -72,6 +72,7 @@ export default function MultiPlayerQuizApp() {
   const channelRef = useRef<any>(null);
   const timerRef = useRef<any>(null);
   const playerIdRef = useRef('');
+  const joinedAtRef = useRef<number>(0);
 
   useEffect(() => {
     playerIdRef.current = 'player_' + Math.random().toString(36).substring(2, 9);
@@ -84,7 +85,7 @@ export default function MultiPlayerQuizApp() {
     }
   }, []);
 
-  // 部屋から退出する共通処理（Presenceからも即座に離脱）
+  // 部屋から退出する共通処理
   const handleLeaveRoom = async () => {
     if (stage !== 'home') {
       const confirmLeave = window.confirm('部屋を退出してトップに戻りますか？');
@@ -100,6 +101,7 @@ export default function MultiPlayerQuizApp() {
     clearInterval(timerRef.current);
     setStage('home');
     setRoomCode('');
+    setIsHost(false);
     setPlayers([]);
     setQuestions([]);
     setIsGenerating(false);
@@ -143,21 +145,21 @@ export default function MultiPlayerQuizApp() {
     setTimeLeft(15);
     setStage('playing');
 
-    // 自分のステータスを Presence でリセット更新
     if (channelRef.current) {
       channelRef.current.track({
         id: playerIdRef.current,
-        name: userName.trim() || (isHost ? 'ホスト' : 'ゲスト'),
+        name: userName.trim() || 'プレイヤー',
         score: 0,
         isHost,
         answered: false,
+        joinedAt: joinedAtRef.current,
       });
     }
 
     triggerQuestionTransition(0);
   };
 
-  // Presence state から players 配列を同期作成
+  // Presence state から players 配列を同期作成 & 最古参（一番最初に入った人）を自動でホストに判定
   const syncPlayersFromPresence = (channel: any) => {
     const presenceState = channel.presenceState();
     const activeList: any[] = [];
@@ -167,13 +169,30 @@ export default function MultiPlayerQuizApp() {
         activeList.push(users[0]);
       }
     });
-    setPlayers(activeList);
+
+    if (activeList.length === 0) return;
+
+    // 入室時刻(joinedAt)が一番早い人をホストとして選定
+    activeList.sort((a, b) => (a.joinedAt || 0) - (b.joinedAt || 0));
+    const oldestPlayerId = activeList[0].id;
+    const amIHost = oldestPlayerId === playerIdRef.current;
+
+    setIsHost(amIHost);
+
+    const updatedList = activeList.map((p) => ({
+      ...p,
+      isHost: p.id === oldestPlayerId,
+    }));
+
+    setPlayers(updatedList);
   };
 
-  const connectToRoom = (code: string, hostFlag: boolean, initialUserName: string) => {
+  const connectToRoom = (code: string, initialUserName: string, forceHost = false) => {
     if (channelRef.current) {
       supabase.removeChannel(channelRef.current);
     }
+
+    joinedAtRef.current = Date.now();
 
     const channel = supabase.channel(`quiz-room-${code}`, {
       config: {
@@ -182,7 +201,6 @@ export default function MultiPlayerQuizApp() {
       },
     });
 
-    // Presence による完全な在席同期（切断や退出を自動検知）
     channel
       .on('presence', { event: 'sync' }, () => {
         syncPlayersFromPresence(channel);
@@ -215,8 +233,9 @@ export default function MultiPlayerQuizApp() {
             id: playerIdRef.current,
             name: initialUserName,
             score: myP ? myP.score : 0,
-            isHost: hostFlag,
+            isHost,
             answered: false,
+            joinedAt: joinedAtRef.current,
           });
         }
         triggerQuestionTransition(payload.nextIndex);
@@ -238,19 +257,25 @@ export default function MultiPlayerQuizApp() {
             id: playerIdRef.current,
             name: initialUserName,
             score: 0,
-            isHost: hostFlag,
+            isHost,
             answered: false,
+            joinedAt: joinedAtRef.current,
           });
         }
       })
       .subscribe(async (status) => {
         if (status === 'SUBSCRIBED') {
+          // 初期トラックを送信（部屋作成を押した人は最初からjoinedAtを少し古く設定して確実にホスト化）
+          const effectiveJoinedAt = forceHost ? joinedAtRef.current - 1000 : joinedAtRef.current;
+          joinedAtRef.current = effectiveJoinedAt;
+
           await channel.track({
             id: playerIdRef.current,
             name: initialUserName,
             score: 0,
-            isHost: hostFlag,
+            isHost: forceHost,
             answered: false,
+            joinedAt: effectiveJoinedAt,
           });
         }
       });
@@ -258,7 +283,7 @@ export default function MultiPlayerQuizApp() {
     channelRef.current = channel;
   };
 
-  // 部屋作成
+  // 部屋作成（ホストとして入室）
   const handleCreateRoom = () => {
     const validName = userName.trim() || 'ホスト';
     const random4Digit = Math.floor(1000 + Math.random() * 9000).toString();
@@ -273,49 +298,23 @@ export default function MultiPlayerQuizApp() {
         score: 0,
         isHost: true,
         answered: false,
+        joinedAt: Date.now(),
       },
     ]);
 
-    connectToRoom(random4Digit, true, validName);
+    connectToRoom(random4Digit, validName, true);
   };
 
-  // 部屋参加（ホストの存在確認チェック付き）
-  const handleJoinRoom = async () => {
+  // 友達の部屋に入る（4桁なら何でも入室可能 ＆ 一番最初の人が自動でホストになる）
+  const handleJoinRoom = () => {
     const validName = userName.trim() || 'ゲスト';
     if (!/^\d{4}$/.test(inputCode)) return alert('4桁の半角数字を入力してください');
 
-    // 部屋が存在するか（ホストがいるか）を検証する
-    const checkChannel = supabase.channel(`quiz-room-${inputCode}`);
-    
-    checkChannel.subscribe(async (status) => {
-      if (status === 'SUBSCRIBED') {
-        // Presenceの同期を少し待って確認
-        setTimeout(() => {
-          const presenceState = checkChannel.presenceState();
-          let hostFound = false;
+    setRoomCode(inputCode);
+    setStage('lobby');
 
-          Object.keys(presenceState).forEach((key) => {
-            const list = presenceState[key] as any[];
-            if (list && list.some((u) => u.isHost)) {
-              hostFound = true;
-            }
-          });
-
-          supabase.removeChannel(checkChannel);
-
-          if (!hostFound) {
-            alert('指定された部屋番号の部屋（ホスト）が見つかりません。\n番号を確認するか、ホストに部屋を作成してもらってください。');
-            return;
-          }
-
-          // ホストが存在する場合のみ正式に参加
-          setRoomCode(inputCode);
-          setIsHost(false);
-          setStage('lobby');
-          connectToRoom(inputCode, false, validName);
-        }, 600);
-      }
-    });
+    // 接続時に Presence の在席確認を行い、誰もいなければ自分がホストになる
+    connectToRoom(inputCode, validName, false);
   };
 
   // 対戦開始ボタン
@@ -417,10 +416,11 @@ export default function MultiPlayerQuizApp() {
     if (channelRef.current) {
       channelRef.current.track({
         id: playerIdRef.current,
-        name: userName.trim() || (isHost ? 'ホスト' : 'ゲスト'),
+        name: userName.trim() || 'プレイヤー',
         score: newScore,
         isHost,
         answered: true,
+        joinedAt: joinedAtRef.current,
       });
     }
 
